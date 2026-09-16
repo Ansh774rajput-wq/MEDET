@@ -207,6 +207,17 @@ def test_chat_rejects_unsupported_input_type() -> None:
     assert response.json()["error"]["field"] == "input_type"
 
 
+def test_symptom_fallback_mentions_the_actual_symptoms() -> None:
+    from app.services.medet_ai_provider import build_symptom_aware_fallback
+
+    message = "I have fever and cough for 2 days"
+    reply = build_symptom_aware_fallback(message, "en")
+
+    assert "fever" in reply.lower()
+    assert "cough" in reply.lower()
+    assert "doctor" in reply.lower() or "medical" in reply.lower()
+
+
 def test_stream_returns_tokens_and_final_metadata() -> None:
     with client.stream(
         "POST",

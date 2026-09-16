@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,10 +95,10 @@ async def generate_medet_ai_response(
         ) from exc
     except httpx.HTTPStatusError as exc:
         logger.warning("Medet Ollama rejected request with status %s.", exc.response.status_code)
-        content = _safe_local_guidance(prompt_context.language, emergency)
+        content = _safe_local_guidance(message, prompt_context.language, emergency)
     except (httpx.RequestError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("Medet Ollama unavailable, using healthcare-safe fallback: %s", exc)
-        content = _safe_local_guidance(prompt_context.language, emergency)
+        content = _safe_local_guidance(message, prompt_context.language, emergency)
 
     return MedetGeneration(content=content, sources=sources)
 
@@ -132,11 +133,11 @@ async def stream_medet_ai_response(
         ) from exc
     except httpx.HTTPStatusError as exc:
         logger.warning("Medet Ollama stream rejected request with status %s.", exc.response.status_code)
-        for token in _split_fallback_tokens(_safe_local_guidance(prompt_context.language, emergency)):
+        for token in _split_fallback_tokens(_safe_local_guidance(message, prompt_context.language, emergency)):
             yield {"type": "token", "content": token}
     except (httpx.RequestError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("Medet Ollama stream unavailable, using healthcare-safe fallback: %s", exc)
-        for token in _split_fallback_tokens(_safe_local_guidance(prompt_context.language, emergency)):
+        for token in _split_fallback_tokens(_safe_local_guidance(message, prompt_context.language, emergency)):
             yield {"type": "token", "content": token}
 
 
@@ -316,10 +317,68 @@ def _parse_ollama_stream_line(line: str) -> str:
     return ""
 
 
-def _safe_local_guidance(language: str, emergency: bool) -> str:
+def build_symptom_aware_fallback(message: str, language: str) -> str:
+    normalized = (message or "").strip()
+    if not normalized:
+        return get_followup_text(language)
+
+    symptoms = _extract_symptom_summary(normalized)
+    base = get_followup_text(language)
+    if not symptoms:
+        return base
+
+    if language == "hi":
+        return (
+            f"मैं समझ रहा हूँ कि आपके लक्षण हैं: {symptoms}. कृपया बताएं यह कब से है, "
+            "व्यक्ति की उम्र क्या है, और क्या बुखार, दर्द, खून बहना या कमजोरी है। "
+            "अगर लक्षण तेज़ हों, या सांस लेने, बेहोशी, या बहुत ज्यादा दर्द में परेशानी हो, तुरंत डॉक्टर/स्वास्थ्यकर्मचारी से संपर्क करें।"
+        )
+    if language in {"bn"}:
+        return (
+            f"আমি বুঝতে পারছি আপনার লক্ষণগুলি হচ্ছে: {symptoms}. দয়া করে বলুন এটি কতক্ষণ ধরে হচ্ছে, "
+            "ব্যক্তির বয়স কত, এবং জ্বর, ব্যথা, রক্তপাত বা দুর্বলতা আছে কি না। "
+            "যদি লক্ষণ তীব্র হয় বা শ্বাস নিতে কষ্ট হয়, অজ্ঞানতা পড়ে, বা প্রচণ্ড ব্যথা হয়, অবিলম্বে ডাক্তার/স্বাস্থ্যকর্মীর সঙ্গে যোগাযোগ করুন।"
+        )
+    if language in {"ne"}:
+        return (
+            f"म बुझ्दैछु कि लक्षणहरू छन्: {symptoms}। कृपया यो कहिलेदेखि भइरहेको छ, व्यक्तिको उमेर कति हो, "
+            "र ज्वरो, दुखाइ, रगत बग्ने वा कमजोरी छ कि छैन बताउनुहोस्। यदि लक्षण धेरै खराब छन् वा श्वास घेर्न कठिनाइ, बेहोसी, वा भारी दुखाइ भए तुरुन्त डाक्टर/स्वास्थ्यकर्मीसम्‌पर्क गर्नुहोस्।"
+        )
+    if language in {"ta"}:
+        return (
+            f"நான் புரிந்துகொள்கிறேன், உங்கள் அறிகுறிகள்: {symptoms}. இதை எப்போது முதல் உள்ளது, "
+            "அந்த நபரின் வயது என்ன, காய்ச்சல், வலி, ரத்தப்போக்கு அல்லது பலவீனம் உள்ளதா என்று சொல்லுங்கள். "
+            "அறிகுறிகள் கடுமையாக இருந்தால், சுவாசிப்பதில் சிரமம், மயக்கம், அல்லது கடுமையான வலி இருந்தால் உடனே மருத்துவர்/சுகாதார ஊழியரை தொடர்பு கொள்ளுங்கள்."
+        )
+    if language in {"kn"}:
+        return (
+            f"ನಾನು ಅರ್ಥಮಾಡಿಕೊಂಡಿದ್ದೇನೆ, ನಿಮ್ಮ ಲಕ್ಷಣಗಳು: {symptoms}. ಇದು ಎಷ್ಟು ಸಮಯದಿಂದ ಇದೆ, ಆ ವ್ಯಕ್ತಿಯ ವಯಸ್ಸು ಎಷ್ಟು, "
+            "ಜ್ವರ, ನೋವು, ರಕ್ತಸ್ರಾವ ಅಥವಾ ದುರ್ಬಲತೆ ಇದೆಯೇ ಎಂದು ಹೇಳಿ. ಲಕ್ಷಣಗಳು ತೀವ್ರವಾಗಿದ್ದರೆ ಅಥವಾ ಉಸಿರಾಟದ ತೊಂದರೆ, ಘಟನಾತ್ಮಕ ಮಲಗುವಿಕೆ, ಅಥವಾ ಭಾರೀ ನೋವು ಇದ್ದರೆ ತಕ್ಷಣ ವೈದ್ಯ/ಆರೋಗ್ಯ ಕಾರ್ಯಕರ್ತರನ್ನು ಸಂಪರ್ಕಿಸಿ."
+        )
+    return (
+        f"I understand that the reported symptoms include: {symptoms}. Please tell me how long this has been happening, "
+        "the age of the person, and whether there is fever, pain, bleeding, or weakness. "
+        "If the symptoms are severe, worsening, or include breathing trouble, fainting, or intense pain, seek medical care immediately."
+    )
+
+
+def _extract_symptom_summary(message: str) -> str:
+    clean = re.sub(r"\s+", " ", message.strip())
+    if not clean:
+        return ""
+
+    tokens = [part.strip() for part in clean.split() if part.strip()]
+    if len(tokens) <= 12:
+        return clean
+
+    summary = " ".join(tokens[:12])
+    return f"{summary}..."
+
+
+def _safe_local_guidance(message: str, language: str, emergency: bool) -> str:
     if emergency:
         return URGENT_FALLBACK_TEXT.get(language, URGENT_FALLBACK_TEXT["en"])
-    return get_followup_text(language)
+    return build_symptom_aware_fallback(message, language)
 
 
 def _split_fallback_tokens(text: str) -> list[str]:
